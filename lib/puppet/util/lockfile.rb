@@ -25,8 +25,14 @@ class Puppet::Util::Lockfile
   def lock(lock_data = nil)
     return false if locked?
 
-    File.open(@file_path, 'w') { |fd| fd.print(lock_data) }
-    true
+    begin
+      Puppet::FileSystem.exclusive_create(@file_path, nil) do |fd|
+        fd.print(lock_data)
+      end
+      true
+    rescue Errno::EEXIST
+      false
+    end
   end
 
   def unlock

@@ -28,6 +28,35 @@ describe Puppet::Util::Lockfile do
       Puppet::FileSystem.exist?(@lockfile).should be_true
     end
 
+    # We test simultaneous locks using fork which isn't supported on Windows.
+    it "should not be acquired by another process", :unless => Puppet.features.microsoft_windows? do
+      5.times do |i|
+        first_read, first_write = IO.pipe
+        first_pid = fork do
+          first_read.close
+          success = @lock.lock(Process.pid)
+          Marshal.dump(success, first_write)
+        end
+        second_read, second_write = IO.pipe
+        second_pid = fork do
+          second_read.close
+          success = @lock.lock(Process.pid)
+          Marshal.dump(success, second_write)
+        end
+
+        Process.wait(first_pid)
+        Process.wait(second_pid)
+        first_write.close
+        second_write.close
+        first_result = Marshal.load(first_read.read)
+        second_result = Marshal.load(second_read.read)
+
+        @lock.unlock
+
+        first_result.should_not eq(second_result)
+      end
+    end
+
     it "should create a lock file containing a string" do
       data = "foofoo barbar"
       @lock.lock(data)
