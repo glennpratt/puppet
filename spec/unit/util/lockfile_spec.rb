@@ -3,6 +3,33 @@ require 'spec_helper'
 
 require 'puppet/util/lockfile'
 
+module LockfileSpecHelper
+  def self.run_in_forks(count, &blk)
+    forks = {}
+    results = []
+    count.times do |i|
+      forks[i] = {}
+      forks[i][:read], forks[i][:write] = IO.pipe
+
+      forks[i][:pid] = fork do
+        forks[i][:read].close
+        res = yield
+        Marshal.dump(res, forks[i][:write])
+        exit!
+      end
+    end
+
+    count.times do |i|
+      forks[i][:write].close
+      result = forks[i][:read].read
+      forks[i][:read].close
+      Process.wait2(forks[i][:pid])
+      results << Marshal.load(result)
+    end
+    results
+  end
+end
+
 describe Puppet::Util::Lockfile do
   require 'puppet_spec/files'
   include PuppetSpec::Files
@@ -13,13 +40,13 @@ describe Puppet::Util::Lockfile do
   end
 
   describe "#lock" do
-    it "should return false if already locked" do
-      @lock.stubs(:locked?).returns(true)
-      @lock.lock.should be_false
-    end
-
     it "should return true if it successfully locked" do
       @lock.lock.should be_true
+    end
+
+    it "should return false if already locked" do
+      @lock.lock
+      @lock.lock.should be_false
     end
 
     it "should create a lock file" do
@@ -30,30 +57,26 @@ describe Puppet::Util::Lockfile do
 
     # We test simultaneous locks using fork which isn't supported on Windows.
     it "should not be acquired by another process", :unless => Puppet.features.microsoft_windows? do
-      5.times do |i|
-        first_read, first_write = IO.pipe
-        first_pid = fork do
-          first_read.close
-          success = @lock.lock(Process.pid)
-          Marshal.dump(success, first_write)
+      require 'matrix'
+      require 'pp'
+      matrix = Matrix.build(50, 50) {|row, col| [col + 1, row + 2] }
+      matrix.each do |arr|
+        puts arr.inspect
+        forks = arr[1]
+        arr[0].times do
+          results = LockfileSpecHelper.run_in_forks(forks) do
+            @lock.lock(Process.pid)
+          end
+
+          @lock.unlock
+          # Confirm one fork returned true and everyone else false.
+          begin
+            (results - [true]).size.should == forks - 1
+            (results - [false]).size.should == 1
+          rescue Exception => e
+            puts "#{arr.inspect}: " + e.message
+          end
         end
-        second_read, second_write = IO.pipe
-        second_pid = fork do
-          second_read.close
-          success = @lock.lock(Process.pid)
-          Marshal.dump(success, second_write)
-        end
-
-        Process.wait(first_pid)
-        Process.wait(second_pid)
-        first_write.close
-        second_write.close
-        first_result = Marshal.load(first_read.read)
-        second_result = Marshal.load(second_read.read)
-
-        @lock.unlock
-
-        first_result.should_not eq(second_result)
       end
     end
 
